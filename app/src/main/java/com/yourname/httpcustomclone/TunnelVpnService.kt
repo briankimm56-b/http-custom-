@@ -7,17 +7,18 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
-import net.schmizz.sshj.connection.channel.direct.TCPIPForwardChannel
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
 class TunnelVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var sshTunnel = SshTunnel()
-    private val executor = Executors.newFixedThreadPool(2)
+    private val executor = Executors.newSingleThreadExecutor()
     private var running = false
+    private lateinit var connectionManager: ConnectionManager
 
     companion object {
         const val CHANNEL_ID = "VpnServiceChannel"
@@ -30,65 +31,50 @@ class TunnelVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // 1. Start Foreground with notification
-        val notification = createNotification("Connecting...")
-        startForeground(NOTIFICATION_ID, notification)
+        startForeground(NOTIFICATION_ID, createNotification("Connecting..."))
 
         val host = intent?.getStringExtra("host") ?: return START_NOT_STICKY
         val port = intent.getIntExtra("port", 22)
         val user = intent.getStringExtra("user") ?: ""
         val pass = intent.getStringExtra("pass") ?: ""
-        val targetHost = intent.getStringExtra("targetHost") ?: "google.com"
-        val targetPort = intent.getIntExtra("targetPort", 80)
 
-        // 2. Start VPN
         val builder = Builder()
             .addAddress("10.0.0.2", 24)
-            .addDnsServer("8.8.8.8")
+            .addDnsServer("1.1.1.1")
             .addRoute("0.0.0.0", 0)
             .setSession("HttpCustomClone")
             .setMtu(1500)
 
         vpnInterface = builder.establish()
         running = true
-        updateNotification("Connected to $host")
 
         Thread {
             if (!sshTunnel.connect(host, port, user, pass)) {
-                updateNotification("SSH Connection Failed")
+                updateNotification("SSH Failed")
                 stopSelf()
                 return@Thread
             }
 
+            updateNotification("Tunnel Active")
             val vpnInput = FileInputStream(vpnInterface?.fileDescriptor)
             val vpnOutput = FileOutputStream(vpnInterface?.fileDescriptor)
+            connectionManager = ConnectionManager(vpnOutput, sshTunnel)
 
-            val channel: TCPIPForwardChannel = sshTunnel.openDirectChannel(targetHost, targetPort)
-                ?: return@Thread
-
-            val sshInput = channel.inputStream
-            val sshOutput = channel.outputStream
-
-            updateNotification("Tunnel Active: $targetHost:$targetPort")
-
-            executor.execute { forward(vpnInput, sshOutput) }
-            executor.execute { forward(sshInput, vpnOutput) }
+            val buffer = ByteBuffer.allocate(32767)
+            while (running) {
+                val length = vpnInput.read(buffer.array())
+                if (length > 0) {
+                    buffer.limit(length)
+                    val packet = IpPacket.parse(buffer)
+                    if (packet != null && (packet.protocol == 6 || packet.protocol == 17)) { // TCP or UDP
+                        connectionManager.routePacket(packet)
+                    }
+                    buffer.clear()
+                }
+            }
         }.start()
 
         return START_STICKY
-    }
-
-    private fun forward(input: java.io.InputStream, output: java.io.OutputStream) {
-        val buffer = ByteArray(32767)
-        try {
-            while (running) {
-                val length = input.read(buffer)
-                if (length > 0) {
-                    output.write(buffer, 0, length)
-                    output.flush()
-                } else if (length < 0) break
-            }
-        } catch (e: Exception) { e.printStackTrace() }
     }
 
     private fun createNotificationChannel() {
@@ -125,6 +111,7 @@ class TunnelVpnService : VpnService() {
         running = false
         executor.shutdownNow()
         sshTunnel.disconnect()
+        connectionManager.closeAll()
         vpnInterface?.close()
         stopForeground(true)
         super.onDestroy()
