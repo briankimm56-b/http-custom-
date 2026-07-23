@@ -56,6 +56,9 @@ dependencies {
 
     // HTTP Client
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    
+    // SSH Client
+    implementation("com.hierynomus:sshj:0.37.0")
 
     // Testing
     testImplementation 'junit:junit:4.13.2'
