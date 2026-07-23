@@ -3,41 +3,37 @@ package com.yourname.httpcustomclone
 import android.net.VpnService
 import android.content.Intent
 import android.os.ParcelFileDescriptor
-import android.util.Log
+import kotlin.concurrent.thread
 
 class TunnelVpnService : VpnService() {
-    private val tag = "TunnelVpnService"
     private var vpnInterface: ParcelFileDescriptor? = null
+    private var sshTunnel = SshTunnel()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(tag, "VPN Service started")
-        
-        try {
-            val builder = Builder()
-                .addAddress("10.0.0.2", 24)
-                .addRoute("0.0.0.0", 0)
-                .setSession("HttpCustomClone")
+        val host = intent?.getStringExtra("host") ?: return START_NOT_STICKY
+        val port = intent.getIntExtra("port", 22)
+        val user = intent.getStringExtra("user") ?: ""
+        val pass = intent.getStringExtra("pass") ?: ""
 
-            vpnInterface = builder.establish()
-            Log.d(tag, "VPN Interface established")
-            
-            // Here you would read packets and forward through your SSH/SSL socket
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to establish VPN interface", e)
-            stopSelf()
-            return START_NOT_STICKY
+        val builder = Builder()
+            .addAddress("10.0.0.2", 24)
+            .addRoute("0.0.0.0", 0)
+            .setSession("HttpCustomClone")
+
+        vpnInterface = builder.establish()
+
+        thread {
+            if (sshTunnel.connect(host, port, user, pass)) {
+                // Here you would read from vpnInterface.fileDescriptor and write to SSH channel
+                // For MVP we just keep connection alive
+            }
         }
-        
         return START_STICKY
     }
 
     override fun onDestroy() {
-        Log.d(tag, "VPN Service destroyed")
-        try {
-            vpnInterface?.close()
-        } catch (e: Exception) {
-            Log.e(tag, "Error closing VPN interface", e)
-        }
+        sshTunnel.disconnect()
+        vpnInterface?.close()
         super.onDestroy()
     }
 }
